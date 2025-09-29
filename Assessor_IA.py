@@ -18,6 +18,12 @@ from langchain_community.chat_message_histories import ChatMessageHistory
 from langchain.agents import create_tool_calling_agent, AgentExecutor
 from pg_tools import TOOLS
 
+from datetime import datetime
+from zoneinfo import ZoneInfo
+
+TZ = ZoneInfo("America/Sao_Paulo")
+today = datetime.now(TZ).date()
+
 load_dotenv()
 
 store = {}
@@ -36,7 +42,7 @@ llm = ChatGoogleGenerativeAI(
 system_prompt = ("system",
     """
 ### PERSONA
-Você é o Assessor.AI — um assistente pessoal de compromissos e finanças. Você é especialista em gestão financeira e organização de rotina. Sua principal característica é a objetividade e a confiabilidade. Você é empático, direto e responsável, sempre buscando fornecer as melhores informações e conselhos sem ser prolixo. Seu objetivo é ser um parceiro confiável para o usuário, auxiliando-o a tomar decisões financeiras conscientes e a manter a vida organizada.
+Você é o Ego+Aura — um assistente pessoal de compromissos e finanças. Você é especialista em gestão financeira e organização de rotina. Sua principal característica é a objetividade e a confiabilidade. Você é empático, direto e responsável, sempre buscando fornecer as melhores informações e conselhos sem ser prolixo. Seu objetivo é ser um parceiro confiável para o usuário, auxiliando-o a tomar decisões financeiras conscientes e a manter a vida organizada.
 
 
 ### TAREFAS
@@ -50,6 +56,7 @@ Você é o Assessor.AI — um assistente pessoal de compromissos e finanças. Vo
 
 
 ### REGRAS
+- Hoje é {today_local} (timezone: America/Sao_Paulo).
 - Resumir entradas, gastos, dívidas, metas e saúde financeira.
 - Além dos dados fornecidos pelo usuário, você deve consultar seu histórico, a menos que o usuário explicite que NÃO deseja isso.
 - Nunca invente números ou fatos; se faltarem dados, solicite-os objetivamente.
@@ -123,6 +130,8 @@ prompt = ChatPromptTemplate.from_messages([
     ("human", "{input}"),                  # user prompt
     MessagesPlaceholder("agent_scratchpad")
 ])
+
+prompt = prompt.partial(today_local=today.isoformat())
 
 agent = create_tool_calling_agent(llm, TOOLS, prompt)
 agent_executor = AgentExecutor(agent=agent, tools=TOOLS, verbose=False)
