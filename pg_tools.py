@@ -1,7 +1,7 @@
 import os
 from dotenv import load_dotenv
 import psycopg2
-from typing import Optional
+from typing import Optional, List
 from langchain.tools import tool
 from langchain.pydantic_v1 import BaseModel, Field
 # from pydantic import BaseModel
@@ -78,6 +78,13 @@ def _resolve_category_id(cur, category_name: Optional[str]) -> Optional[int]:
     cur.execute("SELECT id FROM categories WHERE LOWER(name)=%s LIMIT 1;", (t,))
     row = cur.fetchone()
     return row[0] if row else None
+
+def _local_date_filter_sql(field: str = "occurred_at") -> str:
+    """
+    Retorna um trecho SQL para filtragem por dia local em America/Sao_Paulo.
+    Ex.: (occurred_at AT TIME ZONE 'America/Sao_Paulo')::date = %s::date
+    """
+    return f"(({field} AT TIME ZONE 'America/Sao_Paulo')::date = %s::date)"
 
 # Tool: add_transaction
 @tool("add_transaction", args_schema=AddTransactionArgs)
@@ -351,7 +358,7 @@ def update_transaction(
         resolved_type_id = _resolve_type_id(cur, type_id, type_name) if (type_id or type_name) else None
         resolved_category_id = category_id
         if category_name and not category_id:
-            resolved_category_id = _get_category_id(cur, category_name)
+            resolved_category_id = resolved_category_id(cur, category_name)
 
         # Montar SET dinÃ¢mico
         sets = []

@@ -45,6 +45,34 @@ llm_fast = ChatGoogleGenerativeAI(
     google_api_key=os.getenv('GEMINI_API_KEY')
 )
 
+def executar_fluxo_assessor(pergunta_usuario, session_id):
+    saida_roteador = roteador_chain.invoke(
+            {"input": pergunta_usuario},
+            config={"configurable": {'session_id': session_id}}
+    )
+    
+    if "ROUTE=financeiro" in saida_roteador:
+        saida_financeiro = financeiro_chain.invoke(
+            {"input": saida_roteador},
+            config={"configurable": {'session_id': session_id}}
+        )
+        
+        saida = saida_financeiro['output']
+        print("FINANCEIRO")
+        
+    elif "ROUTE=agenda" in saida_roteador:
+        saida_agenda = agenda_chain.invoke(
+            {"input": saida_roteador},
+            config={"configurable": {'session_id': session_id}}
+        )
+        
+        saida = saida_agenda['output']
+        
+    else:
+        return saida_roteador
+    
+    return orquestadror_chain.invoke( {"input": saida}, config={"configurable": {'session_id': session_id}})
+
 # prompt do agente roteador
 system_prompt_roteador = ("system",
     """
@@ -350,6 +378,52 @@ prompt_agenda = ChatPromptTemplate.from_messages([
     MessagesPlaceholder("agent_scratchpad")
 ]).partial(today_local=today.isoformat())
 
+financeiro_agent = create_tool_calling_agent(llm, TOOLS, prompt_financeiro)
+financeiro_executor_base = AgentExecutor(
+    agent=financeiro_agent, 
+    tools=TOOLS, 
+    verbose=False, 
+    handle_parsing_errors=True, 
+    return_intermediate_steps=False
+)
+
+financeiro_chain = RunnableWithMessageHistory(
+    financeiro_executor_base,
+    get_session_history=get_session_history,
+    input_messages_key="input",
+    history_messages_key="chat_history"
+)
+
+agenda_agent = create_tool_calling_agent(llm, TOOLS, prompt_agenda)
+agenda_executor_base = AgentExecutor(
+    agent=agenda_agent, 
+    tools=TOOLS, 
+    verbose=False, 
+    handle_parsing_errors=True, 
+    return_intermediate_steps=False
+)
+
+agenda_chain = RunnableWithMessageHistory(
+    agenda_executor_base,
+    get_session_history=get_session_history,
+    input_messages_key="input",
+    history_messages_key="chat_history"
+)
+
+roteador_chain = RunnableWithMessageHistory(
+    prompt_roteador | llm_fast | StrOutputParser(),
+    get_session_history=get_session_history,
+    input_messages_key="input",
+    history_messages_key="chat_history"
+)
+
+orquestadror_chain = RunnableWithMessageHistory(
+    prompt_orquestrador | llm_fast | StrOutputParser(),
+    get_session_history=get_session_history,
+    input_messages_key="input",
+    history_messages_key="chat_history"
+)
+
 while True:
     user_input = input('> ')
     if user_input.lower() in ('sair', 'end', 'fim', 'tchau', 'bye'):
@@ -357,11 +431,11 @@ while True:
         break
     
     try:
-        resposta = chain.invoke(
-            {"input": user_input},
-            config={"configurable": {'session_id': "PRECISA MAS NAO IMPORTA"}}
+        resposta = executar_fluxo_assessor(
+            pergunta_usuario=user_input,
+            session_id="PRECISA MAS NAO IMPORTA"
         )
     
-        print(resposta['output'])
+        print(resposta)
     except Exception as e:
         print('Erro ao consumir a API:', e)
