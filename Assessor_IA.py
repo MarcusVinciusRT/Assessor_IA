@@ -13,7 +13,9 @@ from langchain.prompts.few_shot import FewShotChatMessagePromptTemplate
 
 # Gerenciamento de histórico
 from langchain_core.runnables.history import RunnableWithMessageHistory
+from langchain_core.runnables import RunnablePassthrough
 from langchain_community.chat_message_histories import ChatMessageHistory
+from operator import itemgetter
 
 from langchain.agents import create_tool_calling_agent, AgentExecutor
 from pg_tools import TOOLS
@@ -87,7 +89,7 @@ Você é o Assessor.AI — um assistente pessoal de compromissos e finanças. É
 
 ### PAPEL
 - Acolher o usuário e manter o foco em FINANÇAS ou AGENDA/compromissos.
-- Decidir a rota: {{financeiro | agenda | fora_escopo}}.
+- Decidir a rota: {{financeiro | agenda | faq}}.
 - Responder diretamente em:
   (a) saudações/small talk, ou 
   (b) fora de escopo (redirecionando para finanças/agenda).
@@ -100,10 +102,13 @@ Você é o Assessor.AI — um assistente pessoal de compromissos e finanças. É
 - Seja breve, educado e objetivo.
 - Se faltar um dado absolutamente essencial para decidir a rota, faça UMA pergunta mínima (CLARIFY). Caso contrário, deixe CLARIFY vazio.
 - Responda de forma textual.
-
+- Se a mensagem do usuário for uma dúvida geral sobre o sistema, funcionalidades, regras ou políticas -> ROUTE=faq
+- Se for uma operação financeira, orçamento, transação -> ROUTE=financeiro
+- Se for sobre compromissos, eventos, lembretes -> ROUTE=agenda
+- Se não se encaixar em nenhum desse casos continue a conversa até o usuário conversar sobre finanças ou agenda/compromisso.
 
 ### PROTOCOLO DE ENCAMINHAMENTO (texto puro)
-ROUTE=<financeiro|agenda>
+ROUTE=<financeiro|agenda|faq>
 PERGUNTA_ORIGINAL=<mensagem completa do usuário, sem edições>
 PERSONA=<copie o bloco "PERSONA SISTEMA" daqui>
 CLARIFY=<pergunta mínima se precisar; senão deixe vazio>
@@ -150,6 +155,11 @@ shots_roteador = [
         "human": "Tenho reunião amanhã às 9h?",
         "ai": "ROUTE=agenda\nPERGUNTA_ORIGINAL=Tenho reunião amanhã às 9h?\nPERSONA={PERSONA_SISTEMA}\nCLARIFY="
     },
+    # 6) FAQ
+    {
+        "human": "qual e-mail do suporte?",
+        "ai": "ROUTE=faq\PERGUNTA_ORIGINAL=qual e-mail do suporte?\nPERSONA={{PERSONA_SISTEMA}}\nCLARIFY="
+    }
 ]
 
 fewshots_roteador = FewShotChatMessagePromptTemplate(
@@ -348,6 +358,36 @@ fewshots_orquestrador = FewShotChatMessagePromptTemplate(
     example_prompt=example_prompt_base,
 )
 
+system_prompt_faq = ("system",
+"""
+### PAPEL
+Você deve responder perguntas sobre dúvidas SOMENTE com base no documento normativo oficial (trechos fornecidos em CONTEXTO).
+Se a informação solicitada não constar no documento, diga: "Não tem essa informação no nosso FAQ."
+
+## REGRAS
+- Seja breve, claro e educado.
+- Fale em linguagem simples, sem jargões técnicos ou referências a código/infra.
+- Quando fizer sentido, mencione a parte relevante (ex.: "Seção 6.2.1") se isso estiver explícito no trecho.
+- Não prometa funcionalidades futuras. Se o documento falar em roadmap, informe de modo conservador.
+- Em tópicos sensíveis, reforce a informação normativa (ex.: LGPD, impossibilidade de exclusão de lançamentos, não substituição de profissionais, suporte).
+
+## ENTRADA
+- ROUTE=faq
+- PERGUNTA_ORIGINAL=...
+- PERSONA=... (use como diretriz de concisão/objetividade)
+- CLARIFY=... (se preenchido, responda primeiro)
+"""
+)
+
+prompt_faq = ChatPromptTemplate.from_messages([
+    system_prompt_faq,
+    ("human",
+    "Pergunta do usuário:\n{question}\n\n"
+    "CONTEXTO (trechos do documento):\n{context}\n\n"
+    "Responda com base APENAS no CONTEXTO.")
+])
+
+
 prompt_roteador = ChatPromptTemplate.from_messages([
     system_prompt_roteador,                          # system prompt
     fewshots_roteador,                               # Shots human/ai
@@ -422,6 +462,14 @@ orquestadror_chain = RunnableWithMessageHistory(
     get_session_history=get_session_history,
     input_messages_key="input",
     history_messages_key="chat_history"
+)
+
+faq_chain = (
+    RunnablePassthrough.assign (
+    questio=itemgetter("input"),
+    context=lambda x: get_faq_context(x['input'])
+    )
+    | prompt_orquestrador | llm_fast | StrOutputParser()
 )
 
 while True:
