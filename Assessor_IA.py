@@ -23,6 +23,8 @@ from pg_tools import TOOLS
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
+from faq_tools import get_faq_context
+
 TZ = ZoneInfo("America/Sao_Paulo")
 today = datetime.now(TZ).date()
 
@@ -69,6 +71,14 @@ def executar_fluxo_assessor(pergunta_usuario, session_id):
         )
         
         saida = saida_agenda['output']
+        
+    elif "ROUTE=faq" in saida_roteador:
+        saida_faq = faq_chain.invoke(
+            {"input": saida_roteador},
+            config={"configurable": {'session_id': session_id}}
+        )
+        
+        return saida_faq
         
     else:
         return saida_roteador
@@ -158,7 +168,7 @@ shots_roteador = [
     # 6) FAQ
     {
         "human": "qual e-mail do suporte?",
-        "ai": "ROUTE=faq\PERGUNTA_ORIGINAL=qual e-mail do suporte?\nPERSONA={{PERSONA_SISTEMA}}\nCLARIFY="
+        "ai": "ROUTE=faq\\PERGUNTA_ORIGINAL=qual e-mail do suporte?\nPERSONA={{PERSONA_SISTEMA}}\nCLARIFY="
     }
 ]
 
@@ -466,10 +476,10 @@ orquestadror_chain = RunnableWithMessageHistory(
 
 faq_chain = (
     RunnablePassthrough.assign (
-    questio=itemgetter("input"),
+    question=itemgetter("input"),
     context=lambda x: get_faq_context(x['input'])
     )
-    | prompt_orquestrador | llm_fast | StrOutputParser()
+    | prompt_faq | llm_fast | StrOutputParser()
 )
 
 while True:
