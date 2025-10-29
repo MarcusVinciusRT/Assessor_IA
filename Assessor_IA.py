@@ -18,6 +18,7 @@ from langchain_community.chat_message_histories import ChatMessageHistory
 from operator import itemgetter
 
 from langchain.agents import create_tool_calling_agent, AgentExecutor
+from langgraph.graph import StateGraph, START, END
 from pg_tools import TOOLS
 
 from datetime import datetime
@@ -49,42 +50,6 @@ llm_fast = ChatGoogleGenerativeAI(
     google_api_key=os.getenv('GEMINI_API_KEY')
 )
 
-def executar_fluxo_assessor(pergunta_usuario, session_id):
-    saida_roteador = roteador_chain.invoke(
-            {"input": pergunta_usuario},
-            config={"configurable": {'session_id': session_id}}
-    )
-    
-    if "ROUTE=financeiro" in saida_roteador:
-        saida_financeiro = financeiro_chain.invoke(
-            {"input": saida_roteador},
-            config={"configurable": {'session_id': session_id}}
-        )
-        
-        saida = saida_financeiro['output']
-        print("FINANCEIRO")
-        
-    elif "ROUTE=agenda" in saida_roteador:
-        saida_agenda = agenda_chain.invoke(
-            {"input": saida_roteador},
-            config={"configurable": {'session_id': session_id}}
-        )
-        
-        saida = saida_agenda['output']
-        
-    elif "ROUTE=faq" in saida_roteador:
-        saida_faq = faq_chain.invoke(
-            {"input": saida_roteador},
-            config={"configurable": {'session_id': session_id}}
-        )
-        
-        return saida_faq
-        
-    else:
-        return saida_roteador
-    
-    return orquestadror_chain.invoke( {"input": saida}, config={"configurable": {'session_id': session_id}})
-
 # prompt do agente roteador
 system_prompt_roteador = ("system",
     """
@@ -99,7 +64,7 @@ Você é o Assessor.AI — um assistente pessoal de compromissos e finanças. É
 
 ### PAPEL
 - Acolher o usuário e manter o foco em FINANÇAS ou AGENDA/compromissos.
-- Decidir a rota: {{financeiro | agenda | faq}}.
+- Decidir a rota: {{financeiro | agenda | fora_escopo | faq}}.
 - Responder diretamente em:
   (a) saudações/small talk, ou 
   (b) fora de escopo (redirecionando para finanças/agenda).
@@ -116,6 +81,7 @@ Você é o Assessor.AI — um assistente pessoal de compromissos e finanças. É
 - Se for uma operação financeira, orçamento, transação -> ROUTE=financeiro
 - Se for sobre compromissos, eventos, lembretes -> ROUTE=agenda
 - Se não se encaixar em nenhum desse casos continue a conversa até o usuário conversar sobre finanças ou agenda/compromisso.
+
 
 ### PROTOCOLO DE ENCAMINHAMENTO (texto puro)
 ROUTE=<financeiro|agenda|faq>
@@ -467,7 +433,7 @@ roteador_chain = RunnableWithMessageHistory(
     history_messages_key="chat_history"
 )
 
-orquestadror_chain = RunnableWithMessageHistory(
+orquestrador_chain = RunnableWithMessageHistory(
     prompt_orquestrador | llm_fast | StrOutputParser(),
     get_session_history=get_session_history,
     input_messages_key="input",
@@ -482,18 +448,131 @@ faq_chain = (
     | prompt_faq | llm_fast | StrOutputParser()
 )
 
+# Criação dos nós no langGraph
+def router_node(state: dict) -> dict:
+    resposta_roteador = roteador_chain.invoke(
+        {"input": state["input"]}, 
+        config={"configurable": {"session_id": state["session_id"]}}
+    )  
+    
+    if not resposta_roteador.startswith("ROUTE="):
+        return {"resposta_usuario": resposta_roteador}
+    
+    rota = resposta_roteador.split("\n", 1)[0].split("=", 1)[1].strip().lower()
+    if rota not in {"financeiro", "agenda", "faq"}:
+        return {"erro": f"Rota inválida: {rota}"}
+
+    return {"rota": rota, "roteador": resposta_roteador, 'input':state['input'], 'session_id': state['session_id']}
+
+def faq_node(state: dict) -> dict:
+    result = faq_chain.invoke(
+        {"input": state['roteador']},
+        config={"configurable": {"session_id": state["session_id"]}}
+    )
+    
+    return {"resposta_usuario": result, 'session_id': state['session_id']}
+
+def financeiro_node(state: dict) -> dict:
+    result = financeiro_executor_base.invoke(
+        {
+            "input": state['roteador'],
+            "chat_history": [],
+        },
+        config={"configurable": {"session_id": state["session_id"]}}
+    )
+    return {"saida_especialista": result["output"], 'session_id': state['session_id']}
+
+def agenda_node(state: dict) -> dict:
+    result = agenda_executor_base.invoke(
+        {"input": state['roteador']}, 
+        config={"configurable": {"session_id": state["session_id"]}}
+    )  
+    return {"saida_especialista": result["output"], 'session_id': state['session_id']}
+
+def orchestrator_node(state: dict) -> dict:
+    resposta_final = orquestrador_chain.invoke(
+        {"input": state['saida_especialista']},
+        config={"configurable": {"session_id": state["session_id"]}}
+    )  
+    return {"resposta_usuario": resposta_final}
+# ------------------- DECISOR ------------------------
+
+def decide_after_router(state: dict) -> str:
+    if state.get("erro") or state.get("resposta_usuario"):
+        return "end"
+    rota = state.get("rota")
+    if rota == "financeiro":
+        return "financeiro"
+    if rota == "agenda":
+        return "agenda"
+    if rota == "faq":
+        return "faq"
+    return "end"
+
+def decide_after_specialist(state: dict) -> str:
+    if state.get("erro"):
+        return "end"
+    return "orquestrador"
+
+def executar_fluxo_assessor(pergunta_usuario: str, session_id: str) -> str:
+    final_state = app.invoke({"input": pergunta_usuario, "session_id": session_id})
+    if final_state.get("erro"):
+        return f"Erro: {final_state['erro']}"
+    return final_state.get("resposta_usuario", "Não foi possível responder.") # isso é um if não tiver resposta_usuario, mostre a "não foi possivel..."
+
+# ------------------- CONSTRUÇÃO DO GRAFO ------------
+
+graph = StateGraph(dict)
+
+graph.add_node("roteador", router_node)
+graph.add_node("financeiro", financeiro_node)
+graph.add_node("agenda", agenda_node)
+graph.add_node("faq", faq_node)
+graph.add_node("orquestrador", orchestrator_node)
+
+graph.add_edge(START, "roteador")
+
+graph.add_conditional_edges(
+    "roteador",
+    decide_after_router,
+    {
+        "financeiro": "financeiro",
+        "agenda": "agenda",
+        "faq": "faq",
+        "end": END,
+    },
+)
+
+graph.add_conditional_edges(
+    "financeiro",
+    decide_after_specialist,
+    {"orquestrador": "orquestrador", "end": END},
+)
+graph.add_conditional_edges(
+    "agenda",
+    decide_after_specialist,
+    {"orquestrador": "orquestrador", "end": END},
+)
+
+graph.add_edge("faq", END)
+graph.add_edge("orquestrador", END)
+
+app = graph.compile()
+
 while True:
-    user_input = input('> ')
-    if user_input.lower() in ('sair', 'end', 'fim', 'tchau', 'bye'):
-        print('Encerrando a conversa')
-        break
-    
     try:
+        user_input = input("> ")
+        if user_input.lower() in ('sair', 'end', 'fim', 'tchau', 'bye'):
+            print("Encerrando a conversa.")
+            break
+        
         resposta = executar_fluxo_assessor(
-            pergunta_usuario=user_input,
-            session_id="PRECISA MAS NAO IMPORTA"
+            pergunta_usuario=user_input, 
+            session_id="PRECISA_MAS_NÃO_IMPORTA"
         )
-    
+        
         print(resposta)
+        
     except Exception as e:
-        print('Erro ao consumir a API:', e)
+            print("Erro ao consumir a API:", e)
+            continue

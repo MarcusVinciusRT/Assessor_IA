@@ -439,4 +439,4 @@ def update_transaction(
             pass
 
 # Exporta a lista de tools
-TOOLS = [add_transaction, query_transactions, total_balance, daily_balance]
+TOOLS = [add_transaction, query_transactions, total_balance, daily_balance, update_transaction]
