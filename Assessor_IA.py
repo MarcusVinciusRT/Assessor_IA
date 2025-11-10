@@ -26,6 +26,8 @@ from zoneinfo import ZoneInfo
 
 from faq_tools import get_faq_context
 
+from guardrail import verificar_guardrail
+
 TZ = ZoneInfo("America/Sao_Paulo")
 today = datetime.now(TZ).date()
 
@@ -497,6 +499,19 @@ def orchestrator_node(state: dict) -> dict:
     return {"resposta_usuario": resposta_final}
 # ------------------- DECISOR ------------------------
 
+def guard_rail_node(state: dict) -> str:
+    acao, mensagem, gatilhos = verificar_guardrail(state["input"]) 
+    
+    if acao in ["SANITIZAR", "BLOQUEAR", "AVISAR"]:
+        return {"resposta_usuario": mensagem}
+    
+    return {"input": state["input"], "session_id": state["session_id"]}
+
+def decide_after_guardrail(state: dict) -> str:
+    if state.get("resposta_usuario"):
+        return "roteador"
+    return "end"
+
 def decide_after_router(state: dict) -> str:
     if state.get("erro") or state.get("resposta_usuario"):
         return "end"
@@ -529,8 +544,18 @@ graph.add_node("financeiro", financeiro_node)
 graph.add_node("agenda", agenda_node)
 graph.add_node("faq", faq_node)
 graph.add_node("orquestrador", orchestrator_node)
+graph.add_node("guardrail", guard_rail_node)
 
-graph.add_edge(START, "roteador")
+graph.add_edge(START, "guardrail")
+
+graph.add_conditional_edges(
+    "guardrail",
+    decide_after_guardrail,
+    {
+        "roteador": "roteador",
+        "end": END,
+    },
+)
 
 graph.add_conditional_edges(
     "roteador",
